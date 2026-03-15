@@ -6,6 +6,8 @@
 #include <unordered_map>
 #include <mutex>
 #include <condition_variable>
+#include <vector>
+#include <sstream>
 
 #include "net/socket.h"
 #include "protocol/handshake.h"
@@ -20,6 +22,75 @@ namespace
     constexpr std::uint16_t kDefaultListenPort  = 9001; // guard connects here
     constexpr std::uint16_t kDefaultNextHopPort = 9002; // exit listens here
     const std::string kDefaultNextHost = "127.0.0.1";
+
+    constexpr std::uint16_t kDefaultDirectoryPort = 7000;
+    const std::string kDefaultDirectoryHost = "127.0.0.1";
+
+    bool recv_line(tor::net::Socket& sock, std::string& line) {
+        line.clear();
+        char ch = 0;
+        while (true) {
+            int n = ::recv(sock.raw(), &ch, 1, 0);
+            if (n <= 0) return false;
+            if (ch == '
+') break;
+            if (ch != '
+') line.push_back(ch);
+            if (line.size() > 4096) return false;
+        }
+        return true;
+    }
+
+    bool send_line(tor::net::Socket& sock, const std::string& line) {
+        try {
+            sock.send_all(reinterpret_cast<const std::uint8_t*>(line.data()), line.size());
+            static const char nl = '
+';
+            sock.send_all(reinterpret_cast<const std::uint8_t*>(&nl), 1);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    bool directory_register(const std::string& dirHost, std::uint16_t dirPort,
+                            const std::string& nodeName, const std::string& nodeIp,
+                            std::uint16_t listenPort) {
+        try {
+            auto ds = tor::net::Socket::connect_tcp(dirHost, dirPort);
+            std::string line;
+            recv_line(ds, line);
+            recv_line(ds, line);
+            if (!send_line(ds, "REGISTER " + nodeName + " " + nodeIp + " " + std::to_string(listenPort))) return false;
+            if (!recv_line(ds, line)) return false;
+            return line.rfind("OK ", 0) == 0;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    bool directory_get(const std::string& dirHost, std::uint16_t dirPort,
+                       const std::string& nodeName, std::string& host, std::uint16_t& port) {
+        try {
+            auto ds = tor::net::Socket::connect_tcp(dirHost, dirPort);
+            std::string line;
+            recv_line(ds, line);
+            recv_line(ds, line);
+            if (!send_line(ds, "GET " + nodeName)) return false;
+            if (!recv_line(ds, line)) return false;
+            std::istringstream iss(line);
+            std::string tag, name;
+            int p = 0;
+            iss >> tag;
+            if (tag != "NODE") return false;
+            iss >> name >> host >> p;
+            if (name != nodeName || host.empty() || p <= 0 || p > 65535) return false;
+            port = static_cast<std::uint16_t>(p);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
 
     struct CircuitEntry {
         std::unique_ptr<tor::crypto::OnionState> onion;
@@ -253,12 +324,13 @@ namespace
 int main(int argc, char** argv)
 {
     // Usage:
-    //   MiddleNode.exe [listen_port] [next_host] [next_port]
+    //   MiddleNode.exe [listen_port] [next_host] [next_port] [directory_host] [directory_port]
     //
     // Defaults:
     //   listen_port = 9001
     //   next_host   = 127.0.0.1
     //   next_port   = 9002
+    //   directory   = 127.0.0.1:7000
 
     try
     {
@@ -267,12 +339,32 @@ int main(int argc, char** argv)
         std::uint16_t listenPort = kDefaultListenPort;
         std::string nextHost = kDefaultNextHost;
         std::uint16_t nextPort = kDefaultNextHopPort;
+        std::string dirHost = kDefaultDirectoryHost;
+        std::uint16_t dirPort = kDefaultDirectoryPort;
 
         if (argc >= 2) listenPort = static_cast<std::uint16_t>(std::stoi(argv[1]));
         if (argc >= 3) nextHost = argv[2];
         if (argc >= 4) nextPort = static_cast<std::uint16_t>(std::stoi(argv[3]));
+        if (argc >= 5) dirHost = argv[4];
+        if (argc >= 6) dirPort = static_cast<std::uint16_t>(std::stoi(argv[5]));
 
         auto listener = tor::net::Socket::listen_tcp(listenPort);
+
+        if (directory_register(dirHost, dirPort, "MIDDLE", "127.0.0.1", listenPort)) {
+            std::cout << "[middle] registered in directory server " << dirHost << ":" << dirPort << "\n";
+        } else {
+            std::cout << "[middle] warning: failed to register in directory server " << dirHost << ":" << dirPort << "\n";
+        }
+
+        if (argc < 4) {
+            std::string resolvedHost;
+            std::uint16_t resolvedPort = 0;
+            if (directory_get(dirHost, dirPort, "EXIT", resolvedHost, resolvedPort)) {
+                nextHost = resolvedHost;
+                nextPort = resolvedPort;
+            }
+        }
+
         std::cout << "[middle] listening on " << listenPort << ", next hop " << nextHost << ":" << nextPort << "\n";
 
         while (true)
