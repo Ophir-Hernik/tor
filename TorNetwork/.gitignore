@@ -1,0 +1,7 @@
+/vcpkg/
+/vcpkg_installed/
+/.vs/
+**/x64/
+**/Debug/
+**/Release/
+*.user
