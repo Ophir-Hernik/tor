@@ -71,6 +71,12 @@ bool DirectoryServer::start() {
         if (clientSocket == INVALID_SOCKET) {
             continue;
         }
+
+        char clientIp[INET_ADDRSTRLEN] = "unknown";
+        ::inet_ntop(AF_INET, &clientAddr.sin_addr, clientIp, INET_ADDRSTRLEN);
+        std::cout << "New connection from " << clientIp << ":"
+            << ntohs(clientAddr.sin_port) << "\n";
+
         std::thread(&DirectoryServer::handleClient, this, clientSocket).detach();
     }
     cleanup();
